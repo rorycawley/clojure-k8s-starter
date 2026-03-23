@@ -167,15 +167,353 @@ A Service does **not** point to a Deployment — it points to **Pods** by label 
 
 `bb k8s-status` shows all three levels so you can verify the chain is connected.
 
+## What problem does Kubernetes solve?
+
+Imagine you've built this `registry-api`. It works on your laptop. Now you need to run it in production where real users depend on it. You have some worries:
+
+- What if the server crashes at 3am?
+- What if you get 10x more traffic than expected?
+- What if you need to deploy a new version without downtime?
+
+You *could* SSH into a server, run `java -jar registry-api.jar`, and babysit it. But that doesn't scale, and you'd never sleep.
+
+Kubernetes is an automation system. You write YAML files describing **what you want** ("run 2 copies of my app, restart them if they crash, spread traffic between them"), and K8s makes it happen. You declare the desired state — K8s figures out how to get there and keep it there.
+
+This repo has three YAML files, each answering one question:
+
 ## K8s manifests
 
 All manifests live in `k8s/`:
 
 | File | What it does |
 |------|-------------|
-| `configmap.yaml` | Key-value pairs injected as environment variables into the pods. This is where non-secret config lives (app env, DB host, OTEL settings). |
-| `deployment.yaml` | Tells K8s to run 2 replicas of the app. Includes three types of health probes: **startup** (gives the JVM up to 60s to boot), **readiness** (only send traffic when the app is ready), and **liveness** (restart the pod if it becomes unresponsive). Also sets CPU/memory resource requests and limits. |
-| `service.yaml` | Creates a stable network endpoint for the pods. Maps port 80 to container port 8080. Other services in the cluster can reach the app at `registry-api:80`. |
+| `configmap.yaml` | **"What config does my app need?"** See [ConfigMap deep dive](#configmap-deep-dive) below. |
+| `deployment.yaml` | **"How should my app run?"** See [Deployment deep dive](#deployment-deep-dive) below. |
+| `service.yaml` | **"How do other things talk to my app?"** See [Service deep dive](#service-deep-dive) below. |
+
+### ConfigMap deep dive
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-api-config
+data:
+  APP_ENV: "dev"
+  PORT: "8080"
+  DB_HOST: "postgres.internal.example"
+  DB_PORT: "5432"
+  DB_NAME: "registry"
+  DB_SSLMODE: "require"
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+```
+
+Every K8s YAML file follows the same structure at the top. Think of it like a form you're filling in:
+
+- `apiVersion` — which version of the K8s API understands this form
+- `kind` — what *type* of thing you're creating
+- `metadata` — a name tag so you can refer to it later
+- Then the actual content (here it's `data`, other kinds use `spec`)
+
+The `data` section is just key-value pairs. All strings — K8s ConfigMaps can only store strings.
+
+This file on its own does nothing. It just sits in K8s as a named bundle of values. It only becomes useful when something *else* references it. The connection happens in `deployment.yaml`:
+
+```yaml
+envFrom:
+  - configMapRef:
+      name: registry-api-config
+```
+
+Notice how `name: registry-api-config` matches `metadata: name: registry-api-config` in the ConfigMap — that's the link. K8s takes every key-value pair from the ConfigMap and injects them as environment variables into the container.
+
+The full chain looks like this:
+
+```
+configmap.yaml                      deployment.yaml
+─────────────                       ───────────────
+data:                               envFrom:
+  DB_HOST: "postgres.example"  ──►    - configMapRef:
+  DB_PORT: "5432"                         name: registry-api-config
+  APP_ENV: "dev"                              │
+                                              ▼
+                                    Container starts with:
+                                      DB_HOST=postgres.example
+                                      DB_PORT=5432
+                                      APP_ENV=dev
+                                              │
+                                              ▼
+                                    Aero reads config.edn:
+                                      :host #or [#env DB_HOST "127.0.0.1"]
+                                              │
+                                              ▼
+                                    Clojure code:
+                                      (get-in config [:database :host])
+                                      → "postgres.example"
+```
+
+The key insight: you build your Docker image **once**, and the ConfigMap controls which database, which port, which environment it runs against. Dev, staging, and prod can all use the same JAR — just different ConfigMaps.
+
+### Deployment deep dive
+
+`deployment.yaml` is the biggest of the three files. Let's take it chunk by chunk.
+
+**Chunk 1: The header**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-api
+```
+
+Same form structure as the ConfigMap. The `kind: Deployment` is the important part — it tells K8s "I want you to **run and manage** containers for me."
+
+**Chunk 2: Replicas and selector**
+
+```yaml
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: registry-api
+```
+
+`replicas: 2` is the most important line in this file. It says: "I want 2 copies of my app running at all times."
+
+These copies are called **pods**. A pod is the smallest thing K8s manages — basically a wrapper around one or more containers. In this repo, one pod = one container running `java -jar registry-api.jar`.
+
+If one pod crashes, K8s notices and starts a replacement. You always have 2 running. That's the core promise.
+
+The `selector` with `matchLabels` is how K8s answers the question "which pods belong to this Deployment?" It's a label-matching system. The other half of this lives in the pod template below.
+
+**Chunk 3: The pod template**
+
+```yaml
+  template:
+    metadata:
+      labels:
+        app: registry-api
+    spec:
+      containers:
+        - name: registry-api
+          image: registry-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: registry-api-config
+```
+
+See `labels: app: registry-api` in the template? And `matchLabels: app: registry-api` in the selector above? Those match — that's how the Deployment knows "these are my pods."
+
+Think of it like this: the Deployment stamps every pod it creates with a sticker that says `app: registry-api`. Then when it needs to check on its pods, it looks for that sticker.
+
+The line `image: registry-api:0.1.0` is what connects this Deployment to the Docker image that the Dockerfile builds. That's why `bb image-build` tags the image as `registry-api:0.1.0` — the name and tag must match exactly. And `imagePullPolicy: IfNotPresent` means "use the local image if it exists, don't try to download it from a remote registry." That's why `bb k8s-deploy` builds the image locally first — K8s finds it already on the machine.
+
+**Chunk 4: The probes**
+
+This is where K8s monitors your app's health.
+
+```yaml
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+```
+
+Three probes. They fire in a specific order, and each one has a different job. Think of it like hiring a new employee (the pod):
+
+**Startup probe** — "Has the new person finished their first-day orientation?" K8s checks `/health` every 2 seconds. Until this passes, the other two probes don't even start. It allows up to 30 failures — that's 30 × 2 = 60 seconds for the JVM to boot.
+
+**Readiness probe** — "Are they ready to take on work?" Once startup passes, K8s checks `/ready` every 5 seconds. If it fails, K8s stops sending traffic to that pod but keeps it alive. It might recover.
+
+**Liveness probe** — "Are they still conscious?" K8s checks `/health` every 10 seconds. If this fails repeatedly, K8s kills and restarts the pod. This is the drastic measure.
+
+Why does the startup probe exist separately? Without it, the liveness probe starts checking `/health` immediately. The JVM is still booting — `/health` doesn't respond — so K8s sees failures. After 3 consecutive failures it thinks "this pod is dead" and kills it. The pod restarts, starts booting again, gets killed again... forever. It's called a **crash loop**.
+
+The startup probe prevents this by saying "I go first. Don't run any other probes until I've passed." Here's the timeline:
+
+```
+t=0s    Pod starts, JVM booting...
+        Startup probe: GET /health → fail (1/30)
+t=2s    Startup probe: GET /health → fail (2/30)
+t=4s    Startup probe: GET /health → fail (3/30)
+t=6s    JVM ready, /health responds
+        Startup probe: GET /health → 200 OK ✓  (startup complete!)
+        ─── readiness and liveness probes now activate ───
+t=9s    Readiness probe: GET /ready → 200 OK ✓  (pod added to Service endpoints)
+t=11s   Liveness probe:  GET /health → 200 OK ✓ (pod stays alive)
+t=14s   Readiness probe: GET /ready → 200 OK ✓
+t=21s   Liveness probe:  GET /health → 200 OK ✓
+        ... continues indefinitely ...
+```
+
+**Chunk 5: Resources**
+
+```yaml
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+```
+
+This tells K8s how much CPU and memory each pod gets. Two numbers per resource:
+
+- `requests` — the **guaranteed minimum**. K8s uses this when deciding which machine (node) to place the pod on. "I need at least this much."
+- `limits` — the **ceiling**. The pod can burst up to this amount, but no further.
+
+`100m` means 100 "millicores" — 10% of one CPU core. `256Mi` is 256 mebibytes of RAM.
+
+What happens if a pod tries to exceed its limits? Two different outcomes depending on the resource:
+
+- **CPU** over limit → the pod gets **throttled** (runs slower, but stays alive)
+- **Memory** over limit → the pod gets **killed** with an `OOMKilled` error (Out Of Memory)
+
+That's the entire `deployment.yaml`.
+
+### Service deep dive
+
+`service.yaml` is the shortest file, but it solves an important problem.
+
+You have `replicas: 2` in your Deployment — so two pods are running, each with its own internal IP address. These IPs are temporary — every time a pod restarts, it gets a new one. So you can't hardcode them.
+
+If another service in your cluster wants to call your API, it has two problems:
+
+1. Which pod do I talk to?
+2. What IP address do I use if they keep changing?
+
+A **Service** solves both. It gives your app one stable name (`registry-api`) and one stable address inside the cluster. It acts as a load balancer — traffic comes in, and the Service forwards it to a healthy pod.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-api
+spec:
+  selector:
+    app: registry-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+```
+
+The `selector` is the key part:
+
+```yaml
+  selector:
+    app: registry-api
+```
+
+Remember the labels in `deployment.yaml`?
+
+```yaml
+  template:
+    metadata:
+      labels:
+        app: registry-api
+```
+
+Same label, same value. That's how the Service finds its pods. Three things use the `app: registry-api` label — all in just two files:
+
+1. **Deployment `selector.matchLabels`** — "which pods do I manage?"
+2. **Deployment `template.metadata.labels`** — stamps the label on each pod it creates
+3. **Service `selector`** — "which pods do I route traffic to?"
+
+The ConfigMap is connected differently — by name reference (`configMapRef: name: registry-api-config`), not by label matching.
+
+The `ports` section maps external to internal:
+
+```yaml
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+```
+
+Two different port numbers. `port: 80` is what callers use. `targetPort: 8080` is what your container listens on. So another service in the cluster would call `http://registry-api:80/api/ping`, and the Service rewrites that to port `8080` on a healthy pod. And `bb k8s-port-forward` tunnels your laptop's localhost:8080 into this Service.
+
+### Recap: how everything connects
+
+```
+configmap.yaml                 deployment.yaml                    service.yaml
+──────────────                 ───────────────                    ────────────
+name: registry-api-config      configMapRef: ───── by name ────►  (not involved)
+                               name: registry-api-config
+
+(not involved)                 selector.matchLabels: ─┐
+                               app: registry-api      │
+                                                      ├── by label ── selector:
+                               template.labels:       │               app: registry-api
+                               app: registry-api  ────┘
+```
+
+**`configmap.yaml`** — a named bundle of environment variables. Connected to the Deployment by `configMapRef: name`.
+
+**`deployment.yaml`** — the brain. Says "run 2 pods of this image, inject config from ConfigMap, and monitor them with 3 probes (startup → readiness → liveness)." Also sets CPU/memory limits.
+
+**`service.yaml`** — the front door. Gives the app a stable name and routes traffic on port 80 to port 8080 on healthy pods. Connected to pods by the `app: registry-api` label.
+
+### How probes connect to your Clojure code
+
+K8s is a real HTTP client — it sends an actual `GET /ready` request to your running Jetty server, just like `curl` would. It only cares about one thing: the HTTP status code.
+
+Here's what happens when that request hits your code. The **readiness handler**:
+
+```clojure
+(defn ready-handler [config]
+  (fn [_request]
+    (let [db-host (get-in config [:database :host])
+          db-name (get-in config [:database :name])
+          database-config-present? (every? seq [db-host db-name])]
+      (if database-config-present?
+        (response/ok ...)            ;; returns status 200 → K8s sends traffic
+        (response/service-unavailable ...)))))  ;; returns status 503 → K8s stops sending traffic
+```
+
+K8s sends the request. Reitit matches `/ready`. Middleware runs. This handler executes. The response goes back to K8s with a status code, and K8s makes its decision.
+
+Now the **liveness handler**:
+
+```clojure
+(defn health-handler [config]
+  (fn [_request]
+    (response/ok
+     {:status "ok"
+      :service (get-in config [:app :name])
+      :env (str (get-in config [:app :env]))})))
+```
+
+Notice something different? There's no `if`. It always returns `response/ok` (200). It never fails as long as the JVM is running and Jetty can handle requests.
+
+That's deliberate. Think about what each probe is asking:
+
+- **Liveness** (`/health`) — "Is the process alive?" If Jetty can respond at all, the answer is yes. If the JVM has frozen or crashed, there's no response at all — and *that's* the failure K8s detects.
+- **Readiness** (`/ready`) — "Is the app ready for real work?" This has actual logic — it checks whether the database config exists.
+
+There's a design principle here: **liveness checks should be simple and almost never fail on purpose**. If you put complex logic in your liveness handler (like checking the database connection) and the database goes down, K8s would kill and restart your pods — even though the *app* is perfectly fine. It would just make things worse.
+
+The **startup probe** also hits `/health`, not `/ready`. Why? Because startup is answering the same question as liveness — "is the process alive yet?" — just during the boot window. It doesn't care whether the app is *ready for traffic*, only whether the JVM has started enough to respond to HTTP. Using `/ready` would be wrong here — the app might be alive but not ready (e.g. waiting for a database migration), and you wouldn't want K8s to think it failed to start.
 
 ## Configuration
 
