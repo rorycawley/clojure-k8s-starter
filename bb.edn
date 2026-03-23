@@ -15,4 +15,42 @@
                :task (shell "docker build -t registry-api:0.1.0 .")}
 
   image-run {:doc "Run container locally"
-             :task (shell "docker run --rm -p 8080:8080 registry-api:0.1.0")}}}
+             :task (shell "docker run --rm -p 8080:8080 registry-api:0.1.0")}
+
+  startup-time
+  {:doc "Measure app startup time for K8s probe initialDelaySeconds"
+   :requires ([babashka.http-client :as http])
+   :task
+   (let [port   8080
+         url    (str "http://localhost:" port "/health")
+         start  (System/currentTimeMillis)
+         proc   (babashka.process/process
+                 ["clojure" "-M:run"]
+                 {:out :inherit :err :inherit})
+         ready? (fn []
+                  (try
+                    (let [resp (http/get url {:timeout 500
+                                              :throw false})]
+                      (= 200 (:status resp)))
+                    (catch Exception _ false)))]
+     (loop []
+       (if (ready?)
+         (let [ms (- (System/currentTimeMillis) start)
+               s  (/ ms 1000.0)]
+           (println)
+           (println (str "✓ App responded on " url " after " s "s (" ms "ms)"))
+           (println)
+           (println "Suggested K8s probe settings:")
+           (println (str "  initialDelaySeconds: " (long (Math/ceil s))))
+           (println (str "  periodSeconds:       5"))
+           (println (str "  failureThreshold:    3"))
+           (babashka.process/destroy-tree proc))
+         (if (> (- (System/currentTimeMillis) start) 60000)
+           (do
+             (println "✗ App did not respond within 60s")
+             (babashka.process/destroy-tree proc)
+             (System/exit 1))
+           (do
+             (Thread/sleep 250)
+             (recur))))))}}}
+
