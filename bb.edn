@@ -1,21 +1,76 @@
 {:tasks
- {run {:doc "Run the API locally"
-       :task (shell "clojure -M:run")}
+ {:init (def default-task "help")
 
-  repl {:doc "Start nREPL with dev tools"
-        :task (shell "clojure -M:dev:nrepl")}
+  help
+  {:doc "Show available tasks"
+   :task (do
+           (println "registry-api — Clojure K8s starter\n")
+           (println "Usage: bb <task>\n")
+           (println "  Development:")
+           (println "    run            Run the API locally")
+           (println "    repl           Start nREPL with dev tools")
+           (println "    test-request   Hit the ping endpoint")
+           (println)
+           (println "  Quality:")
+           (println "    smoke          Require all namespaces (compile check)")
+           (println "    lint           Run clj-kondo linter")
+           (println "    fmt-check      Check formatting with cljfmt")
+           (println "    fmt            Auto-format with cljfmt")
+           (println "    check          Run lint + fmt-check + smoke")
+           (println)
+           (println "  Build & Deploy:")
+           (println "    uberjar        Build the uberjar")
+           (println "    image-build    Build container image")
+           (println "    image-run      Run container locally")
+           (println "    startup-time   Measure startup for K8s probe config")
+           (println)
+           (println "  Housekeeping:")
+           (println "    clean          Remove build/cache artifacts"))}
 
-  uberjar {:doc "Build the uberjar"
-           :task (shell "clojure -T:build uber")}
+  run
+  {:doc "Run the API locally"
+   :task (shell "clojure -M:run")}
 
-  test-request {:doc "Hit the ping endpoint"
-                :task (shell "curl -i http://localhost:8080/api/ping")}
+  repl
+  {:doc "Start nREPL with dev tools"
+   :task (shell "clojure -M:dev:nrepl")}
 
-  image-build {:doc "Build container image"
-               :task (shell "docker build -t registry-api:0.1.0 .")}
+  smoke
+  {:doc "Require all src + dev namespaces (quick compile/sanity check)"
+   :task (shell "clj" "-M:dev" "-e"
+                "(run! require (mapcat (fn [d] (->> (file-seq (clojure.java.io/file d)) (filter #(.endsWith (.getName %) \".clj\")) (map #(-> (.getPath %) (clojure.string/replace d \"\") (subs 1) (clojure.string/replace \"/\" \".\") (clojure.string/replace \"_\" \"-\") (clojure.string/replace \".clj\" \"\") symbol)))) [\"src\" \"dev\"]))")}
 
-  image-run {:doc "Run container locally"
-             :task (shell "docker run --rm -p 8080:8080 registry-api:0.1.0")}
+  lint
+  {:doc "Run clj-kondo on source and dev namespaces"
+   :task (shell "clj-kondo --lint src dev")}
+
+  fmt-check
+  {:doc "Check Clojure formatting with cljfmt"
+   :task (shell "cljfmt check src dev")}
+
+  fmt
+  {:doc "Format Clojure files in place with cljfmt"
+   :task (shell "cljfmt fix src dev")}
+
+  check
+  {:doc "Run quick project checks (lint + format + smoke)"
+   :depends [lint fmt-check smoke]}
+
+  uberjar
+  {:doc "Build the uberjar"
+   :task (shell "clojure -T:build uber")}
+
+  test-request
+  {:doc "Hit the ping endpoint"
+   :task (shell "curl -i http://localhost:8080/api/ping")}
+
+  image-build
+  {:doc "Build container image"
+   :task (shell "docker build -t registry-api:0.1.0 .")}
+
+  image-run
+  {:doc "Run container locally"
+   :task (shell "docker run --rm -p 8080:8080 registry-api:0.1.0")}
 
   startup-time
   {:doc "Measure app startup time for K8s probe initialDelaySeconds"
@@ -52,5 +107,8 @@
              (System/exit 1))
            (do
              (Thread/sleep 250)
-             (recur))))))}}}
+             (recur))))))}
 
+  clean
+  {:doc "Remove common local build/cache artifacts"
+   :task (shell "rm -rf .cpcache target .bb .clj-kondo/.cache")}}}

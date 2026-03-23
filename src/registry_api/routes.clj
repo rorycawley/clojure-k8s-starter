@@ -1,6 +1,5 @@
 (ns registry-api.routes
   (:require
-   [malli.util :as mu]
    [reitit.coercion.malli]
    [reitit.openapi :as openapi]
    [reitit.ring :as ring]
