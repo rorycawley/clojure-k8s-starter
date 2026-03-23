@@ -46,17 +46,17 @@ This builds the Docker image (`registry-api:0.1.0`) and runs `kubectl apply -f k
 bb k8s-status
 ```
 
-You should see 2 pods in `Running` state and the `registry-api` service.
+You should see 2 pods in `Running` state, the `registry-api` service, and endpoint slices showing the pod IPs that the service routes traffic to.
 
 ### 4. Access the app
 
-Forward the K8s service port to localhost:
+Your app is running inside K8s, but it's not directly accessible from your machine. Port-forwarding creates a tunnel from your localhost into the cluster:
 
 ```bash
 bb k8s-port-forward
 ```
 
-Then in another terminal:
+This runs in the foreground — open another terminal to test:
 
 ```bash
 curl http://localhost:8080/api/ping
@@ -66,13 +66,17 @@ curl http://localhost:8080/ready
 
 ### 5. View logs
 
+See what your app is printing to stdout inside the cluster. This tails logs from all pods matching the `app=registry-api` label:
+
 ```bash
 bb k8s-logs
 ```
 
+Press Ctrl+C to stop following.
+
 ### 6. Make changes and redeploy
 
-After editing code, rebuild the image and restart the pods:
+After editing code, this rebuilds the Docker image and tells K8s to do a rolling restart — it spins up new pods with the new image before killing the old ones, so there's no downtime:
 
 ```bash
 bb k8s-restart
@@ -80,35 +84,88 @@ bb k8s-restart
 
 ### 7. Tear down
 
+Remove the K8s resources (deployment, service, configmap) but keep the Docker image:
+
 ```bash
 bb k8s-teardown
 ```
 
+Or nuke everything — K8s resources, Docker image, and local build artifacts — to start completely fresh:
+
+```bash
+bb nuke
+```
+
 ## Babashka tasks
 
-Run `bb help` for the full list. Key tasks:
+Run `bb help` for the full list.
 
-| Task | Description |
+### Development
+
+| Task | What it does |
 |------|-------------|
-| **Development** | |
-| `bb run` | Run the API locally |
-| `bb repl` | Start nREPL with dev tools |
-| `bb test-request` | Hit the ping endpoint |
-| **Quality** | |
-| `bb check` | Run lint + format check + smoke compile |
-| `bb fmt` | Auto-format all Clojure files |
-| **Build** | |
-| `bb uberjar` | Build the uberjar |
-| `bb image-build` | Build container image |
-| `bb image-run` | Run container locally |
-| `bb startup-time` | Measure startup for K8s probe config |
-| **Kubernetes** | |
-| `bb k8s-deploy` | Build image and deploy to local K8s |
-| `bb k8s-status` | Show pod and service status |
-| `bb k8s-logs` | Tail logs from running pods |
-| `bb k8s-port-forward` | Forward localhost:8080 to service |
-| `bb k8s-restart` | Rebuild image and restart deployment |
-| `bb k8s-teardown` | Remove all K8s resources |
+| `bb run` | Starts the API on localhost:8080 using `clojure -M:run`. No Docker or K8s involved. |
+| `bb repl` | Starts an nREPL server so you can connect from your editor for interactive development. |
+| `bb test-request` | Sends `curl -i http://localhost:8080/api/ping` — quick way to check the app is responding. |
+
+### Quality
+
+| Task | What it does |
+|------|-------------|
+| `bb check` | Runs lint, format check, and smoke compile in sequence. Good pre-commit sanity check. |
+| `bb lint` | Runs clj-kondo to catch common Clojure mistakes. |
+| `bb fmt` | Auto-formats all Clojure files in place with cljfmt. |
+| `bb fmt-check` | Checks formatting without changing files. Useful in CI. |
+| `bb smoke` | Requires all namespaces to verify they compile. Catches missing imports and syntax errors. |
+
+### Build
+
+| Task | What it does |
+|------|-------------|
+| `bb uberjar` | Compiles the app into a single JAR file at `target/registry-api.jar`. |
+| `bb image-build` | Builds the Docker image `registry-api:0.1.0`. Uses a two-stage Dockerfile — first stage compiles the uberjar, second stage copies it into a slim JRE image. |
+| `bb image-run` | Runs the Docker image locally on port 8080. Useful to test the container before deploying to K8s. |
+| `bb startup-time` | Starts the app and measures how long until `/health` responds. Helps you set `initialDelaySeconds` on K8s probes so K8s doesn't kill your app before it's ready. |
+
+### Kubernetes
+
+These tasks wrap `kubectl` commands so you don't have to remember the exact flags and label selectors.
+
+| Task | What it does |
+|------|-------------|
+| `bb k8s-deploy` | **First-time setup.** Builds the Docker image, then applies all manifests in `k8s/` (configmap, deployment, service). After this, your app is running in the cluster. |
+| `bb k8s-status` | **"Is everything OK?"** Shows pods (are they Running?), the service (is it created?), and endpoint slices (is the service actually routing to the pods?). If endpoints are empty, the service selector doesn't match any pods. |
+| `bb k8s-logs` | **"What is my app doing?"** Tails stdout from all registry-api pods. This is where you'll see startup messages, request logs, and errors. |
+| `bb k8s-port-forward` | **"Let me hit it from my browser/curl."** Creates a tunnel from localhost:8080 to the K8s service. Without this, the app is only reachable inside the cluster. Runs in the foreground — Ctrl+C to stop. |
+| `bb k8s-restart` | **"I changed code, redeploy it."** Rebuilds the Docker image with your latest code and does a rolling restart — new pods come up before old ones are killed, so there's zero downtime. |
+| `bb k8s-describe` | **"Something's wrong, give me details."** Shows the full K8s description of the deployment and service — probe config, resource limits, events, conditions. This is where you look when pods aren't starting or probes are failing. |
+| `bb k8s-teardown` | **"Remove from K8s but keep the image."** Deletes the deployment, service, and configmap. The Docker image stays so `bb k8s-deploy` is fast next time. |
+| `bb nuke` | **"Burn it all down."** Tears down K8s resources, force-removes the Docker image, and cleans build artifacts. Use this when you want a completely fresh start. |
+
+## How K8s routes traffic to your app
+
+Understanding this flow is key to debugging:
+
+```
+Deployment (creates pods with label app=registry-api)
+    │
+    ▼
+Pods (each gets a unique IP, e.g. 10.42.0.18, 10.42.0.19)
+    │
+    ▼
+EndpointSlice (K8s watches for pods matching the Service selector
+               and records their IPs here)
+    │
+    ▼
+Service (receives traffic on ClusterIP:80, routes to pod IPs on port 8080)
+    │
+    ▼
+port-forward (tunnels localhost:8080 → Service:80 → Pod:8080)
+```
+
+A Service does **not** point to a Deployment — it points to **Pods** by label selector. The Deployment just happens to create pods with the matching label. This distinction matters later when you use other workload types (Jobs, StatefulSets, DaemonSets).
+
+`bb k8s-status` shows all three levels so you can verify the chain is connected.
 
 ## K8s manifests
 
@@ -116,13 +173,13 @@ All manifests live in `k8s/`:
 
 | File | What it does |
 |------|-------------|
-| `configmap.yaml` | Environment variables (app env, DB config, OTEL) |
-| `deployment.yaml` | 2 replicas with startup, liveness, and readiness probes |
-| `service.yaml` | ClusterIP service mapping port 80 to container port 8080 |
+| `configmap.yaml` | Key-value pairs injected as environment variables into the pods. This is where non-secret config lives (app env, DB host, OTEL settings). |
+| `deployment.yaml` | Tells K8s to run 2 replicas of the app. Includes three types of health probes: **startup** (gives the JVM up to 60s to boot), **readiness** (only send traffic when the app is ready), and **liveness** (restart the pod if it becomes unresponsive). Also sets CPU/memory resource requests and limits. |
+| `service.yaml` | Creates a stable network endpoint for the pods. Maps port 80 to container port 8080. Other services in the cluster can reach the app at `registry-api:80`. |
 
 ## Configuration
 
-Configuration is loaded from `resources/config.edn` using Aero. Environment variables are injected via the ConfigMap in K8s:
+Configuration is loaded from `resources/config.edn` using Aero. In K8s, environment variables are injected via the ConfigMap:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -163,11 +220,21 @@ bb.edn             — Babashka task runner config
 
 **Pods stuck in ErrImagePull**
 - The image needs to be built locally: `bb image-build`
-- `imagePullPolicy` is set to `IfNotPresent` so K8s will use the local image
+- `imagePullPolicy` is set to `IfNotPresent` so K8s won't try to pull from a remote registry
 
 **Pods crash-looping**
 - Check logs: `bb k8s-logs`
-- Check events: `kubectl describe pod -l app=registry-api`
+- Check events: `bb k8s-describe` — look at the Events section at the bottom
+- Common cause: the startup probe times out because the JVM is slow to start. Increase `failureThreshold` in `deployment.yaml`.
+
+**Port-forward fails with "address already in use"**
+- Something else is using port 8080. Find it: `lsof -i :8080`
+- Kill it: `kill -9 <PID>`, then retry `bb k8s-port-forward`
+
+**Endpoints are empty in `bb k8s-status`**
+- The service selector (`app=registry-api`) doesn't match any running pods.
+- Check that pods exist and are Ready: `kubectl get pods -l app=registry-api`
+- If pods exist but aren't Ready, the readiness probe is failing — check `bb k8s-describe` for details.
 
 ## Learning path
 

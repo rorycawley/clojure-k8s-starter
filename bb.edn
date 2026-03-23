@@ -1,5 +1,6 @@
 {:tasks
- {:init (def default-task "help")
+ {:override-builtin true
+  :init (def default-task "help")
 
   help
   {:doc "Show available tasks"
@@ -30,9 +31,11 @@
            (println "    k8s-logs       Tail logs from running pods")
            (println "    k8s-port-forward  Forward localhost:8080 to service")
            (println "    k8s-restart    Rebuild image and restart deployment")
+           (println "    k8s-describe    Describe deployment and service")
            (println "    k8s-teardown   Remove all K8s resources")
            (println)
            (println "  Housekeeping:")
+           (println "    nuke           Tear down K8s, remove image, clean all")
            (println "    clean          Remove build/cache artifacts"))}
 
   run
@@ -124,9 +127,11 @@
 
   k8s-status
   {:doc "Show K8s pod and service status"
-   :task (do (shell "kubectl get pods -l app=registry-api")
+   :task (do (shell "kubectl get pods -l app=registry-api -o wide")
              (println)
-             (shell "kubectl get svc registry-api"))}
+             (shell "kubectl get svc registry-api")
+             (println)
+             (shell "kubectl get endpointslices -l kubernetes.io/service-name=registry-api -o wide"))}
 
   k8s-logs
   {:doc "Tail logs from registry-api pods"
@@ -141,9 +146,26 @@
    :depends [image-build]
    :task (shell "kubectl rollout restart deployment/registry-api")}
 
+  k8s-describe
+  {:doc "Describe deployment and service in detail"
+   :task (do (shell "kubectl describe deployment registry-api")
+             (println "\n---\n")
+             (shell "kubectl describe service registry-api"))}
+
   k8s-teardown
   {:doc "Remove all K8s resources"
    :task (shell "kubectl delete -f k8s/")}
+
+  nuke
+  {:doc "Tear down K8s resources, remove image, and clean build artifacts"
+   :task (do
+           (println "Removing K8s resources...")
+           (shell {:continue true} "kubectl delete -f k8s/")
+           (println "\nRemoving Docker image...")
+           (shell {:continue true} "docker rmi -f registry-api:0.1.0")
+           (println "\nCleaning build artifacts...")
+           (shell "rm -rf .cpcache target .bb .clj-kondo/.cache")
+           (println "\nDone. Run 'bb k8s-deploy' to start fresh."))}
 
   clean
   {:doc "Remove common local build/cache artifacts"
