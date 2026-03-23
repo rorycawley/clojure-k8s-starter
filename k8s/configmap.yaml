@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-api-config
+data:
+  APP_ENV: "dev"
+  PORT: "8080"
+  DB_HOST: "postgres.internal.example"
+  DB_PORT: "5432"
+  DB_NAME: "registry"
+  DB_SSLMODE: "require"
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"

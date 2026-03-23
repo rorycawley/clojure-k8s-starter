@@ -1,0 +1,16 @@
+{:app {:name "registry-api"
+       :env #or [#env APP_ENV "dev"]
+       :port #long #or [#env PORT 8080]}
+ :http {:join? false}
+ :database {:host #or [#env DB_HOST "127.0.0.1"]
+            :port #long #or [#env DB_PORT 5432]
+            :name #or [#env DB_NAME "registry"]
+            :ssl-mode #or [#env DB_SSLMODE "require"]}
+
+ ;; These are placeholders for later Vault injection.
+ :secrets {:db-user #or [#env DB_USER ""]
+           :db-password #or [#env DB_PASSWORD ""]}
+
+ :observability {:service-name "registry-api"
+                 :otlp-endpoint #or [#env OTEL_EXPORTER_OTLP_ENDPOINT "http://localhost:4317"]
+                 :enabled #boolean #or [#env OTEL_ENABLED false]}}

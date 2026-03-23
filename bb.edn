@@ -1,0 +1,15 @@
+{:tasks
+ {run {:doc "Run the API locally"
+       :task (shell "clojure -M:run")}
+
+  uberjar {:doc "Build the uberjar"
+           :task (shell "clojure -T:build uber")}
+
+  test-request {:doc "Hit the ping endpoint"
+                :task (shell "curl -i http://localhost:8080/api/ping")}
+
+  image-build {:doc "Build container image"
+               :task (shell "docker build -t registry-api:0.1.0 .")}
+
+  image-run {:doc "Run container locally"
+             :task (shell "docker run --rm -p 8080:8080 registry-api:0.1.0")}}}

@@ -1,0 +1,7 @@
+.git
+.gitignore
+.cpcache
+.nrepl-port
+target
+result*.edn
+.DS_Store
