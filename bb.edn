@@ -2,6 +2,9 @@
  {run {:doc "Run the API locally"
        :task (shell "clojure -M:run")}
 
+  repl {:doc "Start nREPL with dev tools"
+        :task (shell "clojure -M:dev:nrepl")}
+
   uberjar {:doc "Build the uberjar"
            :task (shell "clojure -T:build uber")}
 
