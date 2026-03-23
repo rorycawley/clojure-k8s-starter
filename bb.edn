@@ -18,11 +18,19 @@
            (println "    fmt            Auto-format with cljfmt")
            (println "    check          Run lint + fmt-check + smoke")
            (println)
-           (println "  Build & Deploy:")
+           (println "  Build:")
            (println "    uberjar        Build the uberjar")
            (println "    image-build    Build container image")
            (println "    image-run      Run container locally")
            (println "    startup-time   Measure startup for K8s probe config")
+           (println)
+           (println "  Kubernetes:")
+           (println "    k8s-deploy     Build image and deploy to local K8s")
+           (println "    k8s-status     Show pod and service status")
+           (println "    k8s-logs       Tail logs from running pods")
+           (println "    k8s-port-forward  Forward localhost:8080 to service")
+           (println "    k8s-restart    Rebuild image and restart deployment")
+           (println "    k8s-teardown   Remove all K8s resources")
            (println)
            (println "  Housekeeping:")
            (println "    clean          Remove build/cache artifacts"))}
@@ -108,6 +116,34 @@
            (do
              (Thread/sleep 250)
              (recur))))))}
+
+  k8s-deploy
+  {:doc "Build image and deploy to local K8s cluster"
+   :depends [image-build]
+   :task (shell "kubectl apply -f k8s/")}
+
+  k8s-status
+  {:doc "Show K8s pod and service status"
+   :task (do (shell "kubectl get pods -l app=registry-api")
+             (println)
+             (shell "kubectl get svc registry-api"))}
+
+  k8s-logs
+  {:doc "Tail logs from registry-api pods"
+   :task (shell "kubectl logs -l app=registry-api --tail=50 -f")}
+
+  k8s-port-forward
+  {:doc "Forward localhost:8080 to registry-api service"
+   :task (shell "kubectl port-forward svc/registry-api 8080:80")}
+
+  k8s-restart
+  {:doc "Rebuild image and restart deployment"
+   :depends [image-build]
+   :task (shell "kubectl rollout restart deployment/registry-api")}
+
+  k8s-teardown
+  {:doc "Remove all K8s resources"
+   :task (shell "kubectl delete -f k8s/")}
 
   clean
   {:doc "Remove common local build/cache artifacts"

@@ -75,7 +75,11 @@
      {:get {:summary "Simple test endpoint"
             :responses {200 {:body PingResponse}}
             :handler ping-handler}}]]
-   {:data {:coercion reitit.coercion.malli/coercion
+   {:data {:openapi {:id "openapi"
+                     :info {:title "registry-api"
+                            :version "0.1.0"
+                            :description "Clojure K8s starter API"}}
+           :coercion reitit.coercion.malli/coercion
            :muuntaja m/instance
            :middleware [openapi/openapi-feature
                         parameters/parameters-middleware
